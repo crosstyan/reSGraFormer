@@ -4,6 +4,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Final, Literal, Optional, TypeVar, Union, cast
 
+import loguru
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -214,7 +215,19 @@ def step(
     action_error_sum = define_error_list(actions)
 
     def input_augmentation(input_2D: Tensor, hops: Tensor, model: nn.Module):
+        """
+        input_2D: [B, C, F, V, J, 2]
+                  batch, channel, frame, view, joint, x&y
+                  in this case
+                  [32, 2, 27, 4, 17, 2]
+
+        basically it just squeeze the channel dimension and
+        do the forward pass with the model
+        """
         input_2D_non_flip = input_2D[:, 0]
+        assert (
+            len(input_2D_non_flip.shape) == 5
+        ), f"bad shape, expected `[B, F, V, J, 2]`, got {input_2D_non_flip.shape}"
         output_3D_non_flip = cast(Tensor, model(input_2D_non_flip, hops))
         return input_2D_non_flip, output_3D_non_flip
 
