@@ -36,7 +36,7 @@ class Options(BaseModel):
     previous_dir: str = ""
     n_joints: int = 17
     out_joints: int = 17
-    out_all: int = 1
+    out_all: bool = True
     in_channels: int = 2
     out_channels: int = 3
     previous_best_threshold: float = -math.inf

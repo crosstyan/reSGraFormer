@@ -1,10 +1,13 @@
 from os import PathLike
+from pathlib import Path
 from typing import Any, Optional, Sequence, get_type_hints, get_args
 import torch
 import numpy as np
 import torch.utils.data as data
 from common.cameras import normalize_screen_coordinates
 from torch import Tensor
+
+from common.opt import Options
 
 NDArray = np.ndarray
 
@@ -19,13 +22,15 @@ class ChunkedGenerator:
         Optional[int],
         Optional[int],
     ]
+    Pairs = tuple[NDArray, NDArray, NDArray, NDArray, NDArray]
+    pairs: Sequence[Pairs]
 
     def __init__(
         self,
-        batch_size,
-        cameras,
-        poses_3d,
-        poses_2d,
+        batch_size: int,
+        cameras: dict[tuple[str, str], Any],
+        poses_3d: dict[tuple[str, str], Any],
+        poses_2d: dict[tuple[str, str], Any],
         chunk_length=1,
         pad=0,
         causal_shift=0,
@@ -46,7 +51,7 @@ class ChunkedGenerator:
         )
         assert cameras is None or len(cameras) == len(poses_2d)
 
-        pairs = []
+        pairs: list[ChunkedGenerator.Pairs] = []
         self.saved_index = {}
         start_index = 0
 
@@ -209,7 +214,7 @@ class ChunkedGenerator:
                 pad_right_3d = pad_right_2d
             else:
                 low_3d = max(start_3d, 0)
-                high_3d = min(end_3d, seq_3d.shape[0])
+                high_3d: int = min(end_3d, seq_3d.shape[0])
                 pad_left_3d = low_3d - start_3d
                 pad_right_3d = end_3d - high_3d
             if pad_left_3d != 0 or pad_right_3d != 0:
@@ -265,7 +270,14 @@ class ChunkedGenerator:
 
 
 class Fusion(data.Dataset):
-    def __init__(self, opt, dataset, root_path: PathLike, train=True):
+    hop1: Tensor
+    hop2: Tensor
+    hop3: Tensor
+    hop4: Tensor
+
+    subset: int
+
+    def __init__(self, opt: Options, dataset, root_path: PathLike, train=True):
         self.hop1 = torch.tensor(
             [
                 [0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -363,7 +375,7 @@ class Fusion(data.Dataset):
         self.test_list = opt.subjects_test.split(",")
         self.action_filter = None if opt.actions == "*" else opt.actions.split(",")
         self.downsample = opt.downsample
-        self.subset = opt.subset
+        self.subset = int(opt.subset)
         self.stride = opt.stride
         self.crop_uv = opt.crop_uv
         self.test_aug = opt.test_augmentation
@@ -374,6 +386,9 @@ class Fusion(data.Dataset):
             self.cameras_train, self.poses_train, self.poses_train_2d = self.fetch(
                 dataset, self.train_list, subset=self.subset
             )
+            assert self.cameras_train is not None
+            assert self.poses_train is not None
+            assert self.poses_train_2d is not None
             self.generator = ChunkedGenerator(
                 opt.batch_size // opt.stride,
                 self.cameras_train,
@@ -395,6 +410,9 @@ class Fusion(data.Dataset):
             self.cameras_test, self.poses_test, self.poses_test_2d = self.fetch(
                 dataset, self.test_list, subset=self.subset
             )
+            assert self.cameras_test is not None
+            assert self.poses_test is not None
+            assert self.poses_test_2d is not None
             self.generator = ChunkedGenerator(
                 opt.batch_size // opt.stride,
                 self.cameras_test,
@@ -419,11 +437,8 @@ class Fusion(data.Dataset):
                 ]["positions"][:, :1]
 
         keypoints = np.load(
-            self.root_path / ("data_2d_"
-            + self.data_type
-            + "_"
-            + self.keypoints_name
-            + ".npz"),
+            Path(self.root_path)
+            / ("data_2d_" + self.data_type + "_" + self.keypoints_name + ".npz"),
             allow_pickle=True,
         )
         keypoints_symmetry = keypoints["metadata"].item()["keypoints_symmetry"]
@@ -470,8 +485,8 @@ class Fusion(data.Dataset):
 
     def fetch(
         self,
-        dataset,
-        subjects,
+        dataset: Any,
+        subjects: list[str],
         subset=1,
     ):
         out_poses_3d = {}
@@ -518,7 +533,7 @@ class Fusion(data.Dataset):
         Tensor,
     ]
 
-    def __getitem__(self, index) -> GetItemData:
+    def __getitem__(self, index: int) -> GetItemData:
         seq_name, start_3d, end_3d, flip, reverse = self.generator.pairs[index]
 
         cam, gt_3D, input_2D, action, subject, low_2d, high_2d = (
