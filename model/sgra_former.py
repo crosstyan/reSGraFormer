@@ -67,6 +67,7 @@ class SGraFormer(nn.Module):
             drop_rate (float): dropout rate
             attn_drop_rate (float): attention dropout rate
             drop_path_rate (float): stochastic depth rate
+            mvf_kernel (int): kernel size of multi-view cross-channel fusion
             norm_layer: (nn.Module): normalization layer
         """
         super().__init__()
