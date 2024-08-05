@@ -39,7 +39,7 @@ class Options(BaseModel):
     out_all: int = 1
     in_channels: int = 2
     out_channels: int = 3
-    previous_best_threshold: float = math.inf
+    previous_best_threshold: float = -math.inf
     previous_name: str = ""
     mvf_kernel: int = 7
     manual_seed: Optional[int] = None

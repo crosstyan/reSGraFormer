@@ -1,9 +1,10 @@
 from os import PathLike
-from typing import Any, Optional, get_type_hints, get_args
+from typing import Any, Optional, Sequence, get_type_hints, get_args
 import torch
 import numpy as np
 import torch.utils.data as data
 from common.cameras import normalize_screen_coordinates
+from torch import Tensor
 
 NDArray = np.ndarray
 
@@ -13,8 +14,8 @@ class ChunkedGenerator:
         Optional[NDArray],
         Optional[NDArray],
         NDArray,
-        str,
-        Any,
+        list[str],
+        list[str],
         Optional[int],
         Optional[int],
     ]
@@ -508,13 +509,13 @@ class Fusion(data.Dataset):
         Optional[NDArray],
         Optional[NDArray],
         NDArray,
-        str,
-        Any,
+        list[str],
+        list[str],
         np.float64,
         NDArray,
         Optional[int],
         Optional[int],
-        torch.Tensor,
+        Tensor,
     ]
 
     def __getitem__(self, index) -> GetItemData:

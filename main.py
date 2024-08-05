@@ -7,8 +7,7 @@ from typing import Final, Literal, Optional, TypeVar, Union, cast
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.optim as optim
-import torch.utils as utils
+from torch import Tensor
 from mpl_toolkits.mplot3d import Axes3D
 from torch import nn
 from torch.optim.adamw import AdamW
@@ -20,161 +19,24 @@ from tqdm import tqdm
 from common.h36m_dataset import Human36mDataset
 from common.Mydataset import Fusion
 from common.opt import Options
-from common.utils import (AccumLoss, Split, define_error_list, get_varialbe,
-                          mpjpe_cal, print_error, save_model, save_model_epoch,
-                          test_calculation)
+from common.utils import (
+    CumLoss,
+    Split,
+    define_error_list,
+    get_varialbe,
+    mpjpe_cal,
+    print_error,
+    save_model,
+    save_model_epoch,
+    test_calculation,
+    remove_module_prefix,
+)
 from model.sgra_former import SGraFormer
 
 TrainModel = Union[SGraFormer, nn.DataParallel[SGraFormer]]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CUDA_IDs: Final[list[int]] = [0, 1]
 T = TypeVar("T")
-
-
-def visualize_skeletons(input_2D, output_3D, gt_3D, idx=0, output_dir="./output"):
-    # Ensure the tensors are on the CPU and convert them to numpy arrays
-    input_2D = input_2D.cpu().numpy()
-    output_3D = output_3D.cpu().numpy()
-    gt_3D = gt_3D.cpu().numpy()
-
-    # print("====> input_2D: ", input_2D[-1])
-    # Get the first action and first sample from the batch
-    input_sample = input_2D[idx, 0]
-    output_sample = output_3D[idx, 0]
-    gt_3D_sample = gt_3D[idx, 0]
-
-    print(f"\ninput_sample shape: {input_sample.shape}")
-    print(f"output_sample shape: {output_sample.shape}")
-
-    fig = plt.figure(figsize=(25, 5))
-
-    # Define the connections (bones) between joints
-    bones = [
-        (0, 1),
-        (1, 2),
-        (2, 3),  # Left leg
-        (0, 4),
-        (4, 5),
-        (5, 6),  # Right leg
-        (0, 7),
-        (7, 8),
-        (8, 9),
-        (9, 10),  # Spine
-        (7, 11),
-        (11, 12),
-        (12, 13),  # Right arm
-        (7, 14),
-        (14, 15),
-        (15, 16),  # Left arm
-    ]
-
-    # Colors for different parts
-    bone_colors = {"leg": "green", "spine": "blue", "arm": "red"}
-
-    # Function to get bone color based on index
-    def get_bone_color(start, end):
-        if (
-            start in [1, 2, 3]
-            or end in [1, 2, 3]
-            or start in [4, 5, 6]
-            or end in [4, 5, 6]
-        ):
-            return bone_colors["leg"]
-        elif start in [7, 8, 9, 10] or end in [7, 8, 9, 10]:
-            return bone_colors["spine"]
-        else:
-            return bone_colors["arm"]
-
-    # Plotting 2D skeletons from different angles
-    for i in range(4):
-        ax = fig.add_subplot(1, 7, i + 1)
-        ax.set_title(f"2D angle {i+1}")
-        ax.scatter(input_sample[i, :, 0], input_sample[i, :, 1], color="blue")
-
-        # Draw the bones
-        for start, end in bones:
-            bone_color = get_bone_color(start, end)
-            ax.plot(
-                [input_sample[i, start, 0], input_sample[i, end, 0]],
-                [input_sample[i, start, 1], input_sample[i, end, 1]],
-                color=bone_color,
-            )
-
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.set_xlim(
-            np.min(input_sample[:, :, 0]) - 1, np.max(input_sample[:, :, 0]) + 1
-        )
-        ax.set_ylim(
-            np.min(input_sample[:, :, 1]) - 1, np.max(input_sample[:, :, 1]) + 1
-        )
-        ax.grid()
-
-    # Plotting predicted 3D skeleton
-    ax = fig.add_subplot(1, 7, 5, projection="3d")
-    ax.set_title("3D Predicted Skeleton")
-    ax.scatter(
-        output_sample[:, 0],
-        output_sample[:, 1],
-        output_sample[:, 2],
-        color="red",
-        label="Predicted",
-    )
-
-    # Draw the bones in 3D for output_sample
-    for start, end in bones:
-        bone_color = get_bone_color(start, end)
-        ax.plot(
-            [output_sample[start, 0], output_sample[end, 0]],
-            [output_sample[start, 1], output_sample[end, 1]],
-            [output_sample[start, 2], output_sample[end, 2]],
-            color=bone_color,
-        )
-
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")  # type: ignore
-    ax.set_xlim(np.min(output_sample[:, 0]) - 1, np.max(output_sample[:, 0]) + 1)
-    ax.set_ylim(np.min(output_sample[:, 1]) - 1, np.max(output_sample[:, 1]) + 1)
-    ax.set_zlim(np.min(output_sample[:, 2]) - 1, np.max(output_sample[:, 2]) + 1)  # type: ignore
-    ax.legend()
-
-    # Plotting ground truth 3D skeleton
-    ax = fig.add_subplot(1, 7, 6, projection="3d")
-    ax.set_title("3D Ground Truth Skeleton")
-    ax.scatter(
-        gt_3D_sample[:, 0],
-        gt_3D_sample[:, 1],
-        gt_3D_sample[:, 2],
-        color="blue",
-        label="Ground Truth",
-    )
-
-    # Draw the bones in 3D for gt_3D_sample
-    for start, end in bones:
-        bone_color = get_bone_color(start, end)
-        ax.plot(
-            [gt_3D_sample[start, 0], gt_3D_sample[end, 0]],
-            [gt_3D_sample[start, 1], gt_3D_sample[end, 1]],
-            [gt_3D_sample[start, 2], gt_3D_sample[end, 2]],
-            color=bone_color,
-            linestyle="--",
-        )
-
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")  # type: ignore
-    ax.set_xlim(np.min(gt_3D_sample[:, 0]) - 1, np.max(gt_3D_sample[:, 0]) + 1)
-    ax.set_ylim(np.min(gt_3D_sample[:, 1]) - 1, np.max(gt_3D_sample[:, 1]) + 1)
-    ax.set_zlim(np.min(gt_3D_sample[:, 2]) - 1, np.max(gt_3D_sample[:, 2]) + 1)  # type: ignore
-    ax.legend()
-
-    plt.grid()
-
-    # Save the figure
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/skeletons_visualization.png")
-    plt.show()
 
 
 def train(
@@ -218,7 +80,7 @@ def step(
     epoch: int = 1,
     writer: Optional[SummaryWriter] = None,
 ):
-    loss_all = {"loss": AccumLoss()}
+    loss_all = {"loss": CumLoss()}
     action_error_sum = define_error_list(actions)
 
     if split == "train":
@@ -237,12 +99,16 @@ def step(
             split, [input_2D, gt_3D, batch_cam, scale, bb_box, hops]
         )
 
+        def input_augmentation(input_2D: Tensor, hops: Tensor, model: nn.Module):
+            input_2D_non_flip = input_2D[:, 0]
+            output_3D_non_flip = cast(Tensor, model(input_2D_non_flip, hops))
+
+            return input_2D_non_flip, output_3D_non_flip
+
         if split == "train":
             output_3D = model(input_2D, hops)
         elif split == "test":
             input_2D, output_3D = input_augmentation(input_2D, hops, model)
-
-        visualize_skeletons(input_2D, output_3D, gt_3D)
 
         out_target = gt_3D.clone()
         out_target[:, :, 0] = 0
@@ -254,9 +120,11 @@ def step(
             TQDM.set_postfix({"l": loss.item()})
 
             N = input_2D.size(0)
-            loss_all["loss"].update(loss.detach().cpu().numpy() * N, N)
+            loss_all["loss"].update(float(loss.detach().cpu().numpy()) * N, N)
 
-            assert optimizer is not None, "train mode requires optimizer but None"
+            assert (
+                optimizer is not None
+            ), "train mode requires optimizer but None is given"
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -282,13 +150,6 @@ def step(
     elif split == "test":
         p1, p2 = print_error(opt.dataset, action_error_sum, opt.train)
         return p1, p2
-
-
-def input_augmentation(input_2D, hops, model):
-    input_2D_non_flip = input_2D[:, 0]
-    output_3D_non_flip = model(input_2D_non_flip, hops)
-
-    return input_2D_non_flip, output_3D_non_flip
 
 
 def main(opt: Options):
@@ -353,15 +214,6 @@ def main(opt: Options):
     else:
         model = model.to(device)
 
-    def remove_module_prefix(
-        state_dict: dict[str, torch.Tensor]
-    ) -> dict[str, torch.Tensor]:
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            name = k[7:] if k.startswith("module.") else k
-            new_state_dict[name] = v
-        return new_state_dict
-
     if opt.previous_dir != "":
         print("pretrained model path:", opt.previous_dir)
         model_path = opt.previous_dir
@@ -377,20 +229,17 @@ def main(opt: Options):
     for epoch in range(1, opt.nepoch + 1):
         assert train_dataloader is not None, "train_dataloader is None"
         p1, p2 = val(opt, actions, test_dataloader, model)  # type: ignore
-        print("=====> p1, p2", p1, p2)
         if opt.train:
             loss = train(opt, actions, train_dataloader, model, optimizer, epoch)
         else:
             loss = 0.0
 
         if opt.train:
-            save_model_epoch(opt.checkpoint, epoch, model)
+            save_model_epoch(Path(opt.checkpoint), epoch, model)
 
             if p1 < opt.previous_best_threshold:
-                opt.previous_name = save_model(
-                    opt.previous_name, opt.checkpoint, epoch, p1, model
-                )
-                opt.previous_best_threshold = p1
+                opt.previous_name = save_model(opt, epoch, p1, model, "sgra_former")
+                opt.previous_best_threshold = float(p1)
 
         if not opt.train:
             print("p1: %.2f, p2: %.2f" % (p1, p2))

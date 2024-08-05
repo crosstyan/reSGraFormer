@@ -1,6 +1,6 @@
-import logging
 import os
 import random
+from os import PathLike
 from pathlib import Path
 from typing import Final, Literal, Optional, TypeVar, Union, cast
 
@@ -10,54 +10,66 @@ import torch
 import torch.optim as optim
 import torch.utils as utils
 from mpl_toolkits.mplot3d import Axes3D
-from torch import nn
+from torch import Tensor, nn
 from torch.optim.adamw import AdamW
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm import tqdm
+from loguru import logger
 
 from common.h36m_dataset import Human36mDataset
 from common.Mydataset import Fusion
 from common.opt import Options
 from common.utils import (
-    AccumLoss,
+    ActionEstimationError,
     Split,
     define_actions,
     define_error_list,
     get_varialbe,
-    mpjpe_cal,
     print_error,
-    save_model,
-    save_model_epoch,
+    remove_module_prefix,
     test_calculation,
 )
 from model.sgra_former import SGraFormer
 
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CUDA_ID = [0]
-device = torch.device("cuda")
+MODEL_PATH: Final[Path] = Path("checkpoint/epoch_50.pth")
 
 
-def visualize_skeletons(input_2D, output_3D, gt_3D, idx=5, output_dir="./output"):
-    # Ensure the tensors are on the CPU and convert them to numpy arrays
-    input_2D = input_2D.cpu().numpy()
-    output_3D = output_3D.cpu().numpy()
-    gt_3D = gt_3D.cpu().numpy()
+def visualize_skeletons(
+    input_2d: Tensor,
+    output_3d: Tensor,
+    gt_3d: Tensor,
+    batch_idx=0,
+    frame_idx=0,
+    prefix: str = "output",
+    output_dir: Path = Path("output"),
+):
+    input_2d_np = input_2d.cpu().numpy()
+    output_3d_np = output_3d.cpu().numpy()
+    gt_3d_np = gt_3d.cpu().numpy()
 
-    # Get the first action and first sample from the batch
-    input_sample = input_2D[idx, 0]
-    output_sample = output_3D[idx, 0]
-    gt_3D_sample = gt_3D[idx, 0]
+    assert (
+        input_2d_np.shape[0] == output_3d_np.shape[0] == gt_3d_np.shape[0]
+    ), "inconsistent batch size"
+    assert input_2d_np.shape[1] == output_3d_np.shape[1], "inconsistent frame size"
 
-    print(f"\ninput_sample shape: {input_sample.shape}")
-    print(f"output_sample shape: {output_sample.shape}")
+    assert (
+        0 <= batch_idx < input_2d_np.shape[0]
+    ), f"Invalid batch index {batch_idx}, expected 0 <= batch_idx < {input_2d_np.shape[0]}"
+    assert (
+        0 <= frame_idx < input_2d_np.shape[1]
+    ), f"Invalid frame index {frame_idx}, expected 0 <= frame_idx < {input_2d_np.shape[1]}"
+
+    input_sample = input_2d_np[batch_idx, frame_idx]
+    output_sample = output_3d_np[batch_idx, frame_idx]
+    # note that gt only has one frame (unlike input and output)
+    gt_3D_sample = gt_3d_np[batch_idx, 0]
 
     fig = plt.figure(figsize=(25, 5))
 
-    # Define the connections (bones) between joints
     bones = [
         (0, 1),
         (1, 2),
@@ -182,35 +194,40 @@ def visualize_skeletons(input_2D, output_3D, gt_3D, idx=5, output_dir="./output"
 
     # Save the figure
     plt.tight_layout()
-    plt.savefig(f"{output_dir}/skeletons_visualization.png")
-    plt.show()
+    plt.savefig(str(output_dir / f"{prefix}_b{batch_idx}_f{frame_idx}.jpeg"))
+    return fig
 
 
-def val(opt, actions, val_loader, model):
+def val(opt, actions, val_loader, model: nn.Module):
+    model.eval()
     with torch.no_grad():
         return step("test", opt, actions, val_loader, model)
 
 
 def step(
-    split: Literal["train", "test"],
+    split: Split,
     opt: Options,
     actions: list[str],
-    dataLoader: DataLoader,
+    dataloader: DataLoader,
     model: nn.Module,
 ):
-    loss_all = {"loss": AccumLoss()}
     action_error_sum = define_error_list(actions)
 
-    model.eval()
+    def input_augmentation(input_2D: Tensor, hops: Tensor, model: nn.Module):
+        input_2D_non_flip = input_2D[:, 0]
+        output_3D_non_flip = cast(Tensor, model(input_2D_non_flip, hops))
+        return input_2D_non_flip, output_3D_non_flip
 
-    TQDM = tqdm(enumerate(dataLoader), total=len(dataLoader), ncols=100)
-    for i, data in TQDM:
+    for i, data in (
+        pbar := tqdm(enumerate(dataloader), total=len(dataloader), ncols=100)
+    ):
         data = cast(Fusion.GetItemData, data)
         batch_cam, gt_3D, input_2D, action, subject, scale, bb_box, start, end, hops = (
             data
         )
+        assert gt_3D is not None, "None ground truth 3D data"
 
-        [input_2D, gt_3D, batch_cam, scale, bb_box, hops] = get_varialbe(
+        [input_2D, gt_3D, _, scale, bb_box, hops] = get_varialbe(
             split, [input_2D, gt_3D, batch_cam, scale, bb_box, hops]
         )
 
@@ -223,7 +240,18 @@ def step(
         out_target = gt_3D.clone()
         out_target[:, :, 0] = 0
 
-        visualize_skeletons(input_2D, output_3D, gt_3D)
+        idx_bb = i
+        idx_batch = random.randint(0, input_2D.shape[0] - 1)
+        idx_frame = random.randint(0, input_2D.shape[1] - 1)
+        fig = visualize_skeletons(
+            input_2D,
+            output_3D,
+            gt_3D,
+            batch_idx=idx_batch,
+            frame_idx=idx_frame,
+            prefix=f"bb{idx_bb}",
+        )
+        plt.close(fig)
 
         if output_3D is not None:
             if output_3D.shape[1] != 1:
@@ -234,24 +262,30 @@ def step(
                 output_3D, out_target, action, action_error_sum, opt.dataset, subject
             )
 
-        p1, p2 = print_error(opt.dataset, action_error_sum, opt.train)
+        def average_action_loss(action_error_sum: ActionEstimationError):
+            c = 0
+            p1 = 0.0
+            p2 = 0.0
+            for k, v in action_error_sum.items():
+                pp1 = v["p1"].avg
+                pp2 = v["p2"].avg
+                if pp1 > 0 and pp2 > 0:
+                    p1 += pp1
+                    p2 += pp2
+                    c += 1
+            return p1 / c, p2 / c
+
+        p1, p2 = average_action_loss(action_error_sum)
+        p1 *= 1000
+        p2 *= 1000
+        pbar.set_postfix_str(f"p1={p1:.2f}, p2={p2:.2f}")
+        pbar.refresh()
 
     if split == "train":
         raise NotImplementedError
     elif split == "test":
         p1, p2 = print_error(opt.dataset, action_error_sum, opt.train)
         return p1, p2
-
-
-def input_augmentation(input_2D, hops, model):
-    input_2D_non_flip = input_2D[:, 0]
-    output_3D_non_flip = model(input_2D_non_flip, hops)
-
-    # print("======> input_2D_non_flip: ", input_2D_non_flip.shape)
-    # print("======> output_3D_non_flip: ", output_3D_non_flip.shape)
-    # visualize_skeletons(input_2D_non_flip, output_3D_non_flip)
-
-    return input_2D_non_flip, output_3D_non_flip
 
 
 def main(opt: Options):
@@ -268,15 +302,6 @@ def main(opt: Options):
     dataset = Human36mDataset(dataset_path, opt)
     actions = define_actions(opt.actions)  # type: ignore
 
-    train_data = Fusion(opt=opt, train=True, dataset=dataset, root_path=root_path)
-    train_dataloader = DataLoader(
-        train_data,
-        batch_size=opt.batch_size,
-        shuffle=True,
-        num_workers=int(opt.workers),
-        pin_memory=True,
-    )
-
     test_data = Fusion(opt=opt, train=False, dataset=dataset, root_path=root_path)
     test_dataloader = DataLoader(
         test_data,
@@ -286,7 +311,6 @@ def main(opt: Options):
         pin_memory=True,
     )
 
-    MODEL_PATH: Final[Path] = Path("checkpoint/epoch_50.pth")
     model = SGraFormer(
         num_frame=opt.frames,
         num_joints=17,
@@ -300,15 +324,6 @@ def main(opt: Options):
         drop_path_rate=0.1,
     )
 
-    def remove_module_prefix(
-        state_dict: dict[str, torch.Tensor]
-    ) -> dict[str, torch.Tensor]:
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            name = k[7:] if k.startswith("module.") else k
-            new_state_dict[name] = v
-        return new_state_dict
-
     def fix_state_dict_keys(
         state_dict: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
@@ -317,7 +332,7 @@ def main(opt: Options):
         """
         new_state_dict = {}
         for k, v in state_dict.items():
-            if  k.startswith("SF"):
+            if k.startswith("SF"):
                 kk = k.replace("SF", "sf").lower()
                 if "qnorm" in kk:
                     new_state_dict[kk.replace("qnorm", "q_norm")] = v
@@ -346,24 +361,22 @@ def main(opt: Options):
         return new_state_dict
 
     if torch.cuda.device_count() > 1:
-        print("Let's use", torch.cuda.device_count(), "GPUs!")
         model = torch.nn.DataParallel(model, device_ids=CUDA_ID).to(device)
     model = model.to(device)
     pre_dict = torch.load(MODEL_PATH)
     st = remove_module_prefix(pre_dict)
     st = fix_state_dict_keys(st)
-    print("st", st.keys())
     model.load_state_dict(st, strict=True)
 
     t = val(opt, actions, test_dataloader, model)
     t = cast(tuple[float, float], t)
     p1, p2 = t
 
-    print("p1: %.2f, p2: %.2f" % (p1, p2))
-
 
 if __name__ == "__main__":
     opt = Options()
     opt.train = False
     opt.test = True
+    cpu = os.cpu_count()
+    opt.workers = cpu if cpu is not None else 1
     main(opt)

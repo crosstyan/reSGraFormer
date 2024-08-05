@@ -1,4 +1,4 @@
-from typing import Iterable, Literal, Union
+from typing import Final, Iterable, Literal, TypedDict, Union
 import torch
 from torch.autograd import Variable
 import numpy as np
@@ -15,45 +15,124 @@ from torch.autograd import Variable
 from torch import float32, float16, bfloat16
 from typing import Any, Iterable, Sequence
 import os
+from os import PathLike
 
-Precision = Literal["float32", "float16", "bfloat16"]
+from common.opt import Options
+
+NDArray = np.ndarray
+
 Split = Literal["test", "train"]
 SEL_PRECISION = float32
 
+Actions = Literal[
+    "Directions",
+    "Discussion",
+    "Eating",
+    "Greeting",
+    "Phoning",
+    "Photo",
+    "Posing",
+    "Purchases",
+    "Sitting",
+    "SittingDown",
+    "Smoking",
+    "Waiting",
+    "WalkDog",
+    "Walking",
+    "WalkTogether",
+]
 
-def mpjpe_cal(predicted, target):
+ACTIONS: Final[list[str]] = [
+    "Directions",
+    "Discussion",
+    "Eating",
+    "Greeting",
+    "Phoning",
+    "Photo",
+    "Posing",
+    "Purchases",
+    "Sitting",
+    "SittingDown",
+    "Smoking",
+    "Waiting",
+    "WalkDog",
+    "Walking",
+    "WalkTogether",
+]
 
+WildCard = Literal["All", "all", "*"]
+
+
+class CumLoss:
+    val: float
+    avg: float
+    sum: float
+    count: int
+
+    def __init__(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val: float, n=1):
+        self.val = val
+        self.sum += val
+        self.count += n
+        self.avg = self.sum / self.count
+
+
+class EstimationError(TypedDict):
+    p1: CumLoss
+    p2: CumLoss
+
+
+ActionEstimationError = dict[str, EstimationError]
+
+
+def mpjpe_cal(predicted: Tensor, target: Tensor):
     assert predicted.shape == target.shape
     return torch.mean(torch.norm(predicted - target, dim=len(target.shape) - 1))
 
 
-def get_varialbe(split: Split, target: Sequence[Any]):
-    num = len(target)
-    var = []
-    if split == "train":
-        for i in range(num):
-            temp = Variable(target[i], requires_grad=False).contiguous().type(SEL_PRECISION)
-            var.append(temp)
-    else:
-        for i in range(num):
-            temp = Variable(target[i]).contiguous().cuda().type(SEL_PRECISION)
-            var.append(temp)
+def get_varialbe(split: Split, targets: Sequence[Any]):
+    """
+    Convert the targets to the appropriate variable type with selected precision
+    """
 
+    def to_train(t):
+        return Variable(t, requires_grad=False).contiguous().type(SEL_PRECISION)
+
+    def to_test(t):
+        return Variable(t).contiguous().cuda().type(SEL_PRECISION)
+
+    if split == "train":
+        var = list(map(to_train, targets))
+    else:
+        var = list(map(to_test, targets))
     return var
 
 
-def save_model_epoch(save_dir, epoch, model):
-    torch.save(model.state_dict(), "%s/epoch_%d.pth" % (save_dir, epoch))
-
-
-def test_calculation(predicted, target, action, error_sum, data_type, subject):
+def test_calculation(
+    predicted: Tensor,
+    target: Tensor,
+    action: list[str],
+    error_sum: ActionEstimationError,
+    data_type: Any,
+    subject: Any,
+):
     error_sum = mpjpe_by_action_p1(predicted, target, action, error_sum)
     error_sum = mpjpe_by_action_p2(predicted, target, action, error_sum)
 
     return error_sum
 
 
-def mpjpe_by_action_p1(predicted, target, action, action_error_sum):
+def mpjpe_by_action_p1(
+    predicted: Tensor,
+    target: Tensor,
+    action: list[str],
+    action_error_sum: ActionEstimationError,
+):
     assert predicted.shape == target.shape
     num = predicted.size(0)
     dist = torch.mean(
@@ -82,7 +161,12 @@ def mpjpe_by_action_p1(predicted, target, action, action_error_sum):
     return action_error_sum
 
 
-def mpjpe_by_action_p2(predicted, target, action, action_error_sum):
+def mpjpe_by_action_p2(
+    predicted: Tensor,
+    target: Tensor,
+    action: list[str],
+    action_error_sum: ActionEstimationError,
+):
     assert predicted.shape == target.shape
     num = predicted.size(0)
     pred = (
@@ -113,7 +197,7 @@ def mpjpe_by_action_p2(predicted, target, action, action_error_sum):
     return action_error_sum
 
 
-def p_mpjpe(predicted, target):
+def p_mpjpe(predicted: NDArray, target: NDArray):
     assert predicted.shape == target.shape
 
     muX = np.mean(target, axis=1, keepdims=True)
@@ -151,21 +235,9 @@ def p_mpjpe(predicted, target):
     )
 
 
-class AccumLoss(object):
-    def __init__(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val
-        self.count += n
-        self.avg = self.sum / self.count
-
-
-def print_error(data_type, action_error_sum, is_train):
+def print_error(
+    data_type: Any, action_error_sum: ActionEstimationError, is_train: bool
+):
     mean_error_p1, mean_error_p2 = print_error_action(
         action_error_sum, is_train, data_type
     )
@@ -173,9 +245,9 @@ def print_error(data_type, action_error_sum, is_train):
     return mean_error_p1, mean_error_p2
 
 
-def print_error_action(action_error_sum, is_train, data_type):
+def print_error_action(action_error_sum: ActionEstimationError, is_train, data_type):
     mean_error_each = {"p1": 0.0, "p2": 0.0}
-    mean_error_all = {"p1": AccumLoss(), "p2": AccumLoss()}
+    mean_error_all = {"p1": CumLoss(), "p2": CumLoss()}
 
     if not is_train:
         print("{0:=^12} {1:=^10} {2:=^8}".format("Action", "p#1 mm", "p#2 mm"))
@@ -207,31 +279,48 @@ def print_error_action(action_error_sum, is_train, data_type):
     return mean_error_all["p1"].avg, mean_error_all["p2"].avg
 
 
-def save_model(args, epoch, mpjpe, model, model_name):
-    os.makedirs(args.checkpoint, exist_ok=True)
+def save_model_epoch(
+    save_dir: PathLike,
+    epoch: int,
+    model: nn.Module | nn.DataParallel,
+):
+    if isinstance(model, torch.nn.DataParallel):
+        torch.save(model.module.state_dict(), "%s/epoch_%d.pth" % (save_dir, epoch))
+    else:
+        torch.save(model.state_dict(), "%s/epoch_%d.pth" % (save_dir, epoch))
 
-    if os.path.exists(args.previous_name):
-        os.remove(args.previous_name)
+
+def save_model(
+    opts: Options,
+    epoch: int,
+    mpjpe: float,
+    model: nn.Module | nn.DataParallel,
+    model_name: str,
+):
+    os.makedirs(opts.checkpoint, exist_ok=True)
+
+    if os.path.exists(opts.previous_name):
+        os.remove(opts.previous_name)
 
     previous_name = "%s/%s_%d_%d.pth" % (
-        args.checkpoint,
+        opts.checkpoint,
         model_name,
         epoch,
         mpjpe * 100,
     )
 
-    torch.save(model.state_dict(), previous_name)
+    if isinstance(model, torch.nn.DataParallel):
+        torch.save(model.module.state_dict(), previous_name)
+    else:
+        torch.save(model.state_dict(), previous_name)
 
     return previous_name
 
 
-def define_error_list(actions):
-    error_sum = {}
+def define_error_list(actions: Sequence[str]) -> ActionEstimationError:
+    error_sum: dict[str, EstimationError] = {}
     error_sum.update(
-        {
-            actions[i]: {"p1": AccumLoss(), "p2": AccumLoss()}
-            for i in range(len(actions))
-        }
+        {actions[i]: {"p1": CumLoss(), "p2": CumLoss()} for i in range(len(actions))}
     )
     return error_sum
 
@@ -242,63 +331,22 @@ def deterministic_random(min_value, max_value, data):
     return int(raw_value / (2**32 - 1) * (max_value - min_value)) + min_value
 
 
-Actions = Literal[
-    "Directions",
-    "Discussion",
-    "Eating",
-    "Greeting",
-    "Phoning",
-    "Photo",
-    "Posing",
-    "Purchases",
-    "Sitting",
-    "SittingDown",
-    "Smoking",
-    "Waiting",
-    "WalkDog",
-    "Walking",
-    "WalkTogether",
-]
-
-WildCard = Literal["All", "all", "*"]
-
-
 def define_actions(action: Actions | WildCard) -> list[str]:
-    actions = [
-        "Directions",
-        "Discussion",
-        "Eating",
-        "Greeting",
-        "Phoning",
-        "Photo",
-        "Posing",
-        "Purchases",
-        "Sitting",
-        "SittingDown",
-        "Smoking",
-        "Waiting",
-        "WalkDog",
-        "Walking",
-        "WalkTogether",
-    ]
-
     if action == "All" or action == "all" or action == "*":
-        return actions
+        return ACTIONS
 
-    if not action in actions:
+    if not action in ACTIONS:
         raise ValueError("Unrecognized action: {}".format(action))
 
     return [action]
 
 
-def Load_model(args, model):
-    model_paths = sorted(glob.glob(os.path.join(args.previous_dir, "*.pth")))
-    model_path = model_paths[0]
-    print(model_path)
+def remove_module_prefix(
+    state_dict: dict[str, Tensor]
+) -> dict[str, Tensor]:
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        name = k[7:] if k.startswith("module.") else k
+        new_state_dict[name] = v
+    return new_state_dict
 
-    pre_dict = torch.load(model_path)
-    model_dict = model.state_dict()
-
-    state_dict = {k: v for k, v in pre_dict.items() if k in model_dict.keys()}
-    model_dict.update(state_dict)
-    model.load_state_dict(model_dict)
