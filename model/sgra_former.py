@@ -1,15 +1,10 @@
-## Our model was revised from https://github.com/zczcwh/PoseFormer/blob/main/common/model_poseformer.py
-
 import torch
 import torch.nn as nn
 from torch import Tensor
-from functools import partial
-from einops import rearrange
-from timm.models.layers import DropPath
-
 from model.spatial_encoder import FirstViewSpatialFeatures, SpatialFeatures
 from model.temporal_encoder import TemporalFeatures
 from typing import Optional
+## Our model was revised from https://github.com/zczcwh/PoseFormer/blob/main/common/model_poseformer.py
 
 
 class SGraFormer(nn.Module):

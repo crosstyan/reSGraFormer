@@ -6,7 +6,7 @@ from torch import Tensor
 from functools import partial
 from einops import rearrange
 from timm.models.layers import DropPath
-from model.common_layers import MLP, Attention, CvaAttention, MultiInOutBlock, MultiOutBlock
+from model.common_layers import MultiInOutBlock, MultiOutBlock
 
 ## Our model was revised from https://github.com/zczcwh/PoseFormer/blob/main/common/model_poseformer.py
 class FirstViewSpatialFeatures(nn.Module):

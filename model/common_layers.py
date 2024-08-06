@@ -310,6 +310,7 @@ class MultiInOutBlock(nn.Module):
     norm1: nn.Module
     attn: Attention
     drop_path: nn.Module
+    cva_attn: CvaAttention
     norm2: nn.Module
     mlp: MLP
     norm_hop1: nn.Module
