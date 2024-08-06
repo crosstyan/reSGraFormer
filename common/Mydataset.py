@@ -28,7 +28,7 @@ class ChunkedGenerator:
     def __init__(
         self,
         batch_size: int,
-        cameras: dict[tuple[str, str], Any],
+        cameras: Optional[dict[tuple[str, str], Any]],
         poses_3d: dict[tuple[str, str], Any],
         poses_2d: dict[tuple[str, str], Any],
         chunk_length=1,
@@ -410,7 +410,6 @@ class Fusion(data.Dataset):
             self.cameras_test, self.poses_test, self.poses_test_2d = self.fetch(
                 dataset, self.test_list, subset=self.subset
             )
-            assert self.cameras_test is not None
             assert self.poses_test is not None
             assert self.poses_test_2d is not None
             self.generator = ChunkedGenerator(
